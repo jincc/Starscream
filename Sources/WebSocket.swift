@@ -139,12 +139,13 @@ open class FoundationStream : NSObject, WSStream, StreamDelegate  {
     let BUFFER_MAX = 4096
 	
 	public var enableSOCKSProxy = false
-    
+    private let mutex = NSLock()
     public func connect(url: URL, port: Int, timeout: TimeInterval, ssl: SSLSettings, completion: @escaping ((Error?) -> Void)) {
         var readStream: Unmanaged<CFReadStream>?
         var writeStream: Unmanaged<CFWriteStream>?
         let h = url.host! as NSString
         CFStreamCreatePairWithSocketToHost(nil, h, UInt32(port), &readStream, &writeStream)
+        mutex.lock()
         inputStream = readStream!.takeRetainedValue()
         outputStream = writeStream!.takeRetainedValue()
 
@@ -159,7 +160,11 @@ open class FoundationStream : NSObject, WSStream, StreamDelegate  {
             }
         #endif
         
-        guard let inStream = inputStream, let outStream = outputStream else { return }
+        guard let inStream = inputStream, let outStream = outputStream else {
+            mutex.unlock()
+            return
+        }
+        mutex.unlock()
         inStream.delegate = self
         outStream.delegate = self
         if ssl.useSSL {
@@ -187,8 +192,8 @@ open class FoundationStream : NSObject, WSStream, StreamDelegate  {
             if let cipherSuites = ssl.cipherSuites {
                 #if os(watchOS) //watchOS us unfortunately is missing the kCFStream properties to make this work
                 #else
-                if let sslContextIn = CFReadStreamCopyProperty(inputStream, CFStreamPropertyKey(rawValue: kCFStreamPropertySSLContext)) as! SSLContext?,
-                    let sslContextOut = CFWriteStreamCopyProperty(outputStream, CFStreamPropertyKey(rawValue: kCFStreamPropertySSLContext)) as! SSLContext? {
+                if let sslContextIn = CFReadStreamCopyProperty(inStream, CFStreamPropertyKey(rawValue: kCFStreamPropertySSLContext)) as! SSLContext?,
+                    let sslContextOut = CFWriteStreamCopyProperty(outStream, CFStreamPropertyKey(rawValue: kCFStreamPropertySSLContext)) as! SSLContext? {
                     let resIn = SSLSetEnabledCiphers(sslContextIn, cipherSuites, cipherSuites.count)
                     let resOut = SSLSetEnabledCiphers(sslContextOut, cipherSuites, cipherSuites.count)
                     if resIn != errSecSuccess {
@@ -229,13 +234,29 @@ open class FoundationStream : NSObject, WSStream, StreamDelegate  {
     }
     
     public func write(data: Data) -> Int {
-        guard let outStream = outputStream else {return -1}
+        print("LOG JC WebSocket  write start lock")
+        mutex.lock()
+        guard let outStream = outputStream else {
+            print("LOG JC WebSocket write stop lock,outStream不存在")
+            mutex.unlock()
+            return -1
+        }
+        mutex.unlock()
+        print("LOG JC WebSocket write stop lock")
         let buffer = UnsafeRawPointer((data as NSData).bytes).assumingMemoryBound(to: UInt8.self)
         return outStream.write(buffer, maxLength: data.count)
     }
     
     public func read() -> Data? {
-        guard let stream = inputStream else {return nil}
+        print("LOG JC WebSocket  read start lock")
+        mutex.lock()
+        guard let stream = inputStream else {
+            print("LOG JC WebSocket read stop lock,inputStream不存在")
+            mutex.unlock()
+            return nil
+        }
+        mutex.unlock()
+        print("LOG JC WebSocket read stop lock")
         let buf = NSMutableData(capacity: BUFFER_MAX)
         let buffer = UnsafeMutableRawPointer(mutating: buf!.bytes).assumingMemoryBound(to: UInt8.self)
         let length = stream.read(buffer, maxLength: BUFFER_MAX)
@@ -246,6 +267,8 @@ open class FoundationStream : NSObject, WSStream, StreamDelegate  {
     }
     
     public func cleanup() {
+        print("LOG JC WebSocket cleanup start lock")
+        mutex.lock()
         if let stream = inputStream {
             stream.delegate = nil
             CFReadStreamSetDispatchQueue(stream, nil)
@@ -258,13 +281,21 @@ open class FoundationStream : NSObject, WSStream, StreamDelegate  {
         }
         outputStream = nil
         inputStream = nil
+        mutex.unlock()
+        print("LOG JC WebSocket cleanup stop lock")
     }
     
     #if os(Linux) || os(watchOS)
     #else
     public func sslTrust() -> (trust: SecTrust?, domain: String?) {
-        let trust = outputStream!.property(forKey: kCFStreamPropertySSLPeerTrust as Stream.PropertyKey) as! SecTrust?
-        var domain = outputStream!.property(forKey: kCFStreamSSLPeerName as Stream.PropertyKey) as? String
+        mutex.lock()
+        guard let outputStream = outputStream else {
+            mutex.unlock()
+            return (nil, nil)
+        }
+        mutex.unlock()
+        let trust = outputStream.property(forKey: kCFStreamPropertySSLPeerTrust as Stream.PropertyKey) as! SecTrust?
+        var domain = outputStream.property(forKey: kCFStreamSSLPeerName as Stream.PropertyKey) as? String
         if domain == nil,
             let sslContextOut = CFWriteStreamCopyProperty(outputStream, CFStreamPropertyKey(rawValue: kCFStreamPropertySSLContext)) as! SSLContext? {
             var peerNameLen: Int = 0
@@ -287,9 +318,11 @@ open class FoundationStream : NSObject, WSStream, StreamDelegate  {
      */
     open func stream(_ aStream: Stream, handle eventCode: Stream.Event) {
         if eventCode == .hasBytesAvailable {
+            mutex.lock()
             if aStream == inputStream {
                 delegate?.newBytesInStream()
             }
+            mutex.unlock()
         } else if eventCode == .errorOccurred {
             delegate?.streamDidError(error: aStream.streamError)
         } else if eventCode == .endEncountered {
