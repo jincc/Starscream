@@ -241,10 +241,11 @@ open class FoundationStream : NSObject, WSStream, StreamDelegate  {
             mutex.unlock()
             return -1
         }
-        mutex.unlock()
-        print("LOG JC WebSocket write stop lock")
         let buffer = UnsafeRawPointer((data as NSData).bytes).assumingMemoryBound(to: UInt8.self)
-        return outStream.write(buffer, maxLength: data.count)
+        let result = outStream.write(buffer, maxLength: data.count)
+        print("LOG JC WebSocket write stop lock result:\(result)")
+        mutex.unlock()
+        return result
     }
     
     public func read() -> Data? {
@@ -255,11 +256,11 @@ open class FoundationStream : NSObject, WSStream, StreamDelegate  {
             mutex.unlock()
             return nil
         }
-        mutex.unlock()
-        print("LOG JC WebSocket read stop lock")
         let buf = NSMutableData(capacity: BUFFER_MAX)
         let buffer = UnsafeMutableRawPointer(mutating: buf!.bytes).assumingMemoryBound(to: UInt8.self)
         let length = stream.read(buffer, maxLength: BUFFER_MAX)
+        print("LOG JC WebSocket read stop lock result:\(length)")
+        mutex.unlock()
         if length < 1 {
             return nil
         }
@@ -319,10 +320,13 @@ open class FoundationStream : NSObject, WSStream, StreamDelegate  {
     open func stream(_ aStream: Stream, handle eventCode: Stream.Event) {
         if eventCode == .hasBytesAvailable {
             mutex.lock()
-            if aStream == inputStream {
-                delegate?.newBytesInStream()
+            guard let aStream = inputStream else {
+                print("LOG JC WebSocket stream stream inputStream不存在")
+                mutex.unlock()
+                return
             }
             mutex.unlock()
+            delegate?.newBytesInStream()
         } else if eventCode == .errorOccurred {
             delegate?.streamDidError(error: aStream.streamError)
         } else if eventCode == .endEncountered {
